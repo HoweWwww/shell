@@ -891,8 +891,27 @@ baota_management() {
             curl -sSO http://download.bt.cn/install/install_panel.sh && bash install_panel.sh
             ;;
         2) # 海外版
-            echo -e "${YELLOW}正在安装宝塔面板(海外版)...${NC}"
-            wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh && bash install.sh
+            echo "1. 安装6.0版本（稳定版）"
+            echo "2. 安装7.0版本（最新Free）" 
+            read -p "请选择版本 [1-2]: " ver_choice
+            
+            case $ver_choice in
+                1)
+                    wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh && bash install.sh
+                    ;;
+                2)
+                    URL="https://www.aapanel.com/script/install_7.0_en.sh"
+                    if [ -f /usr/bin/curl ]; then
+                        curl -ksSO "$URL" && bash install_7.0_en.sh aapanel
+                    else
+                        wget --no-check-certificate -O install_7.0_en.sh "$URL" && bash install_7.0_en.sh aapanel
+                    fi
+                    ;;
+                *)
+                    echo -e "${RED}无效选择，请重新选择[1-2]${NC}"
+                    continue
+                    ;;
+            esac
             ;;
         3) # 卸载
             echo -e "${YELLOW}正在卸载宝塔面板...${NC}"
