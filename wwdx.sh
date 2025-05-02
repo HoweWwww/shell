@@ -400,13 +400,20 @@ allow_firewall_port() {
 toggle_firewall() {
     case $FIREWALL_TOOL in
         ufw)
-            local ufw_status=$(sudo ufw status | grep -w active)
-            if [[ $ufw_status == *"active"* ]]; then
-                echo -e "${YELLOW}ufw 防火墙当前状态: ${GREEN}已开启${NC}"
-                log "INFO" "检测到ufw防火墙已开启"
+            if command -v ufw >/dev/null 2>&1; then
+                if sudo ufw status | grep -qw "Status: active"; then
+                    echo -e "${YELLOW}ufw 防火墙当前状态: ${GREEN}已开启${NC}"
+                    log "INFO" "检测到ufw防火墙已开启"
+                elif sudo ufw status | grep -qw "Status: inactive"; then
+                    echo -e "${YELLOW}ufw 防火墙当前状态: ${RED}未开启${NC}"
+                    log "INFO" "检测到ufw防火墙未开启"
+                else
+                    echo -e "${YELLOW}ufw 防火墙: ${RED}未安装或状态未知${NC}"
+                    log "WARNING" "无法确定ufw防火墙状态"
+                fi
             else
-                echo -e "${YELLOW}ufw 防火墙当前状态: ${RED}未开启${NC}"
-                log "INFO" "检测到ufw防火墙未开启"
+                echo -e "${YELLOW}ufw 防火墙: ${RED}未安装${NC}"
+                log "WARNING" "ufw防火墙未安装"
             fi
             echo "1. 启用防火墙"
             echo "2. 禁用防火墙"
@@ -424,13 +431,20 @@ toggle_firewall() {
             esac
             ;;
         firewalld)
-            local firewalld_status=$(sudo firewall-cmd --state 2>&1)
-            if [[ $firewalld_status == *"running"* ]]; then
-                echo -e "${YELLOW}firewalld 防火墙当前状态: ${GREEN}已开启${NC}"
-                log "INFO" "检测到firewalld防火墙已开启"
+            if command -v firewall-cmd >/dev/null 2>&1; then
+                if sudo systemctl is-active firewalld >/dev/null 2>&1; then
+                    echo -e "${YELLOW}firewalld 防火墙当前状态: ${GREEN}已开启${NC}"
+                    log "INFO" "检测到firewalld防火墙已开启"
+                elif sudo systemctl is-enabled firewalld >/dev/null 2>&1; then
+                    echo -e "${YELLOW}firewalld 防火墙当前状态: ${YELLOW}已禁用${NC}"
+                    log "INFO" "检测到firewalld防火墙已禁用"
+                else
+                    echo -e "${YELLOW}firewalld 防火墙: ${RED}未运行${NC}"
+                    log "WARNING" "firewalld防火墙未运行"
+                fi
             else
-                echo -e "${YELLOW}firewalld 防火墙当前状态: ${RED}未开启${NC}"
-                log "INFO" "检测到firewalld防火墙未开启"
+                echo -e "${YELLOW}firewalld 防火墙: ${RED}未安装${NC}"
+                log "WARNING" "firewalld防火墙未安装"
             fi
             echo "1. 启动防火墙"
             echo "2. 停止防火墙" 
