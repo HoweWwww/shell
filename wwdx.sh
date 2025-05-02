@@ -18,24 +18,41 @@ NC='\033[0m'
 
 # 系统检测和初始化
 init_system() {
-    # 检测操作系统
+    # 检测操作系统和硬件信息
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS=$ID
         OS_VERSION=$VERSION_ID
+        OS_PRETTY_NAME="$PRETTY_NAME"
     elif [ -f /etc/centos-release ]; then
         OS="centos"
         OS_VERSION=$(grep -oE '[0-9]+\.[0-9]+' /etc/centos-release)
+        OS_PRETTY_NAME=$(cat /etc/centos-release)
     elif [ -f /etc/debian_version ]; then
-        OS="debian"
+        OS="debian" 
         OS_VERSION=$(cat /etc/debian_version)
+        OS_PRETTY_NAME="Debian $OS_VERSION"
     elif [ -f /etc/alpine-release ]; then
         OS="alpine"
         OS_VERSION=$(cat /etc/alpine-release)
+        OS_PRETTY_NAME="Alpine Linux $OS_VERSION"
     else
         OS=$(uname -s | tr '[:upper:]' '[:lower:]')
         OS_VERSION=$(uname -r)
+        OS_PRETTY_NAME="$OS $OS_VERSION"
     fi
+    
+    # 检测硬件型号
+    if [ -f /sys/devices/virtual/dmi/id/product_name ]; then
+        HW_MODEL=$(cat /sys/devices/virtual/dmi/id/product_name)
+    elif command -v dmidecode &>/dev/null; then
+        HW_MODEL=$(sudo dmidecode -s system-product-name)
+    else
+        HW_MODEL="Unknown"
+    fi
+    
+    # 检测内核详细信息
+    KERNEL_INFO=$(uname -a)
 
     # 检测包管理器
     if command -v apt &>/dev/null; then
@@ -72,26 +89,36 @@ init_system() {
         NETWORK_SERVICE="network-scripts"
     elif command -v nmcli &>/dev/null; then
         NETWORK_SERVICE="NetworkManager"
+    elif [ -f /etc/network/interfaces ]; then
+        NETWORK_SERVICE="interfaces"
+    elif [ -d /etc/network/interfaces.d ]; then
+        NETWORK_SERVICE="interfaces.d"
+    elif command -v ifup &>/dev/null && command -v ifdown &>/dev/null; then
+        NETWORK_SERVICE="ifupdown"
     else
         NETWORK_SERVICE="unknown"
     fi
 
     # 检测防火墙工具
-    if command -v ufw &>/dev/null; then
+    if command -v ufw &>/dev/null && sudo ufw status | grep -q active; then
         FIREWALL_TOOL="ufw"
-    elif command -v firewall-cmd &>/dev/null; then
+    elif command -v firewall-cmd &>/dev/null && sudo firewall-cmd --state 2>&1 | grep -q running; then
         FIREWALL_TOOL="firewalld"
+    elif command -v iptables &>/dev/null && sudo iptables -L -n | grep -v "Chain" | grep -v "target" | grep -q ACCEPT; then
+        FIREWALL_TOOL="iptables"
+    elif command -v nft &>/dev/null && sudo nft list ruleset 2>/dev/null | grep -q accept; then
+        FIREWALL_TOOL="nftables"
     elif command -v iptables &>/dev/null; then
         FIREWALL_TOOL="iptables"
-    elif command -v nft &>/dev/null; then
-        FIREWALL_TOOL="nftables"
     else
         FIREWALL_TOOL="unknown"
     fi
 
-    log "INFO" "系统检测: $OS $OS_VERSION"
+    log "INFO" "系统检测: $OS_PRETTY_NAME"
+    log "INFO" "硬件型号: $HW_MODEL"
+    log "INFO" "内核信息: $KERNEL_INFO"
     log "INFO" "包管理器: $PKG_MANAGER"
-    log "INFO" "服务管理: $SERVICE_MANAGER"
+    log "INFO" "服务管理: $SERVICE_MANAGER" 
     log "INFO" "网络配置: $NETWORK_SERVICE"
     log "INFO" "防火墙工具: $FIREWALL_TOOL"
 }
@@ -146,29 +173,106 @@ modify_ssh_port() {
     fi
 }
 
-# 功能2: 防火墙放行指定端口或所有端口
+# 功能2: iptables通用管理
+iptables_all() {
+    echo -e "${YELLOW}====== iptables 规则管理 ======${NC}"
+    echo "1. 放行端口"
+    echo "2. 删除放行规则"
+    echo "3. 清空所有规则"
+    echo "4. 保存当前规则"
+    echo "5. 恢复默认规则"
+    echo "0. 返回"
+    read -p "请选择操作 [0-5]: " choice
+    
+    case $choice in
+        1)
+            read -p "请输入要放行的端口(如: 80或80,443): " port
+            if [[ ! $port =~ ^[0-9,]+$ ]]; then
+                echo -e "${RED}错误: 端口号格式不正确${NC}"
+                return 1
+            fi
+            sudo iptables -A INPUT -p tcp --match multiport --dports $port -j ACCEPT
+            echo -e "${GREEN}已放行端口: $port${NC}"
+            ;;
+        2)
+            sudo iptables -L INPUT --line-numbers
+            read -p "请输入要删除的规则行号: " line
+            sudo iptables -D INPUT $line
+            echo -e "${GREEN}已删除规则${NC}"
+            ;;
+        3)
+            read -p "确认要清空所有iptables规则吗? (y/n) " confirm
+            if [[ $confirm =~ ^[Yy]$ ]]; then
+                sudo iptables -F
+                sudo iptables -X
+                sudo iptables -Z
+                echo -e "${GREEN}已清空所有iptables规则${NC}"
+            fi
+            ;;
+        4)
+            if command -v iptables-save &>/dev/null; then
+                sudo iptables-save > /etc/iptables.rules
+                echo -e "${GREEN}已保存规则到/etc/iptables.rules${NC}"
+            else
+                echo -e "${RED}iptables-save命令不存在${NC}"
+            fi
+            ;;
+        5)
+            read -p "确认要恢复默认iptables规则吗? (y/n) " confirm
+            if [[ $confirm =~ ^[Yy]$ ]]; then
+                sudo iptables -P INPUT ACCEPT
+                sudo iptables -P FORWARD ACCEPT
+                sudo iptables -P OUTPUT ACCEPT
+                sudo iptables -F
+                echo -e "${GREEN}已恢复默认规则${NC}"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo -e "${RED}无效选择!${NC}"
+            ;;
+    esac
+}
+
+# 功能3: 防火墙放行指定端口或所有端口
 allow_firewall_port() {
     local port=$1
     if [[ -z $port ]]; then
-        echo "1. 放行指定端口"
-        echo "2. 放行所有端口(1-65535)"
-        read -p "请选择操作 [1-2]: " choice
-        
-        case $choice in
-            1)
-                while true; do
-                    read -p "请输入需要放行的端口号: " port
-                    if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
-                        echo -e "${RED}错误: 端口号必须为 1-65535 的整数！${NC}"
-                        log "ERROR" "无效的防火墙端口输入: $port"
-                        continue
-                    fi
-                    break
-                done
-                ;;
-            2)
-                port="1-65535"
-                ;;
+    echo "1. 放行指定端口"
+    echo "2. 放行所有端口(1-65535)"
+    echo "3. 关闭指定端口"
+    read -p "请选择操作 [1-3]: " choice
+    
+    case $choice in
+        1)
+            while true; do
+                read -p "请输入需要放行的端口号: " port
+                if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+                    echo -e "${RED}错误: 端口号必须为 1-65535 的整数！${NC}"
+                    log "ERROR" "无效的防火墙端口输入: $port"
+                    continue
+                fi
+                break
+            done
+            ;;
+        2)
+            port="1-65535"
+            ;;
+        3)
+            while true; do
+                read -p "请输入需要关闭的端口号: " port
+                if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+                    echo -e "${RED}错误: 端口号必须为 1-65535 的整数！${NC}"
+                    log "ERROR" "无效的防火墙端口输入: $port"
+                    continue
+                fi
+                break
+            done
+            close_port "$port"
+            return
+            ;;
             *)
                 echo -e "${RED}无效选择！${NC}"
                 return 1
@@ -257,15 +361,17 @@ allow_firewall_port() {
     esac
 }
 
-# 功能3: 开启/关闭防火墙
+# 功能4: 开启/关闭防火墙
 toggle_firewall() {
     case $FIREWALL_TOOL in
         ufw)
             local ufw_status=$(sudo ufw status | grep -w active)
             if [[ $ufw_status == *"active"* ]]; then
                 echo -e "${YELLOW}ufw 防火墙当前状态: ${GREEN}已开启${NC}"
+                log "INFO" "检测到ufw防火墙已开启"
             else
                 echo -e "${YELLOW}ufw 防火墙当前状态: ${RED}未开启${NC}"
+                log "INFO" "检测到ufw防火墙未开启"
             fi
             echo "1. 启用防火墙"
             echo "2. 禁用防火墙"
@@ -286,8 +392,10 @@ toggle_firewall() {
             local firewalld_status=$(sudo firewall-cmd --state 2>&1)
             if [[ $firewalld_status == *"running"* ]]; then
                 echo -e "${YELLOW}firewalld 防火墙当前状态: ${GREEN}已开启${NC}"
+                log "INFO" "检测到firewalld防火墙已开启"
             else
                 echo -e "${YELLOW}firewalld 防火墙当前状态: ${RED}未开启${NC}"
+                log "INFO" "检测到firewalld防火墙未开启"
             fi
             echo "1. 启动防火墙"
             echo "2. 停止防火墙" 
@@ -299,8 +407,51 @@ toggle_firewall() {
             esac
             sudo systemctl "$action" firewalld
             ;;
+        iptables)
+            echo -e "${YELLOW}iptables 防火墙当前状态:${NC}"
+            sudo iptables -L -n | grep -v "Chain" | grep -v "target" | grep -q ACCEPT && \
+                echo -e "${GREEN}有自定义规则${NC}" || \
+                echo -e "${RED}基本规则或无规则${NC}"
+            
+            echo "1. 查看当前规则"
+            echo "2. 管理iptables规则"
+            echo "3. 保存当前规则"
+            echo "4. 恢复默认规则"
+            read -p "请选择操作 [1-4]: " ipt_choice
+            case $ipt_choice in
+                1) 
+                    sudo iptables -L -n -v 
+                    ;;
+                2) 
+                    iptables_all 
+                    ;;
+                3)
+                    if command -v iptables-save &>/dev/null; then
+                        sudo iptables-save > /etc/iptables.rules
+                        echo -e "${GREEN}已保存规则到/etc/iptables.rules${NC}"
+                    else
+                        echo -e "${RED}iptables-save命令不存在${NC}"
+                    fi
+                    ;;
+                4)
+                    read -p "确认要恢复默认iptables规则吗? (y/n) " confirm
+                    if [[ $confirm =~ ^[Yy]$ ]]; then
+                        sudo iptables -P INPUT ACCEPT
+                        sudo iptables -P FORWARD ACCEPT
+                        sudo iptables -P OUTPUT ACCEPT
+                        sudo iptables -F
+                        echo -e "${GREEN}已恢复默认规则${NC}"
+                    fi
+                    ;;
+                *) 
+                    echo -e "${RED}无效选择!${NC}" 
+                    ;;
+            esac
+            return
+            ;;
         *)
             echo -e "${RED}不支持自动管理此防火墙工具 ($FIREWALL_TOOL)！${NC}"
+            log "WARNING" "不支持的防火墙工具: $FIREWALL_TOOL"
             return 1
             ;;
     esac
@@ -376,27 +527,326 @@ check_nic() {
     esac
 }
 
-# 功能5：网卡添加静态IP
-add_ip() {
-    # 获取网卡列表
+# 功能6.2：删除现有IP
+delete_ip() {
+    # 获取并列出网卡和IP信息(仅显示IPv4)
+    echo -e "${YELLOW}当前网卡和IPv4信息:${NC}"
+    ip -o addr show | awk '/inet / && !/inet6/ {print $2": "$4}' | grep -v "lo:" | while read -r line; do
+        echo -e "  ${GREEN}$line${NC}"
+    done
+    
+    # 选择网卡
     echo -e "${YELLOW}可用网卡列表:${NC}"
-    ip -o link show | awk -F': ' '{print $2}'
-    read -p "请输入要配置的网卡名称: " interface
+    local i=1
+    declare -A nic_map
+    while read -r line; do
+        nic=$(echo "$line" | awk -F': ' '{print $2}')
+        nic_map[$i]=$nic
+        echo "$i. $nic"
+        ((i++))
+    done < <(ip -o link show | grep -v "lo:")
     
-    # 验证网卡存在
-    if ! ip link show "$interface" &>/dev/null; then
-        echo -e "${RED}错误: 网卡 $interface 不存在！${NC}"
+    read -p "请输入要删除IP的网卡编号: " choice
+    if [[ ! $choice =~ ^[0-9]+$ ]] || [[ ! ${nic_map[$choice]} ]]; then
+        echo -e "${RED}错误: 无效的网卡编号！${NC}"
+        return 1
+    fi
+    interface=${nic_map[$choice]}
+    
+    # 获取当前IP
+    current_ip=$(ip -o addr show dev $interface | awk '/inet / && !/inet6/ {print $4}')
+    if [ -z "$current_ip" ]; then
+        echo -e "${RED}错误: 该网卡没有配置IP地址！${NC}"
         return 1
     fi
     
-    # 获取IP地址
-    read -p "请输入要添加的IP地址 (格式: 192.168.1.100/24): " ip_addr
+    echo -e "${YELLOW}当前IP配置: $current_ip${NC}"
+    read -p "确认要删除此IP地址吗？(y/n) " confirm
+    if [[ ! $confirm =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}已取消删除操作${NC}"
+        return
+    fi
     
-    # 验证IP格式
-    if ! [[ $ip_addr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
-        echo -e "${RED}错误: IP地址格式不正确，请使用 CIDR 格式 (如 192.168.1.100/24)${NC}"
+    # 删除IP
+    sudo ip addr del "$current_ip" dev "$interface"
+    echo -e "${GREEN}已删除IP: $current_ip${NC}"
+    
+    # 持久化配置
+    case $NETWORK_SERVICE in
+        netplan)
+            echo -e "${YELLOW}使用 netplan 更新网络配置${NC}"
+            local config_file="/etc/netplan/01-netcfg.yaml"
+            [ -f "$config_file" ] || config_file=$(ls /etc/netplan/*.yaml | head -1)
+            sudo cp "$config_file" "$config_file.bak"
+            sudo sed -i "/$interface:/,/^[^ ]/ {/addresses:/!b; s|addresses: \[.*\]|addresses: []|}" "$config_file"
+            sudo netplan apply
+            ;;
+        network-scripts)
+            echo -e "${YELLOW}使用 network-scripts 更新网络配置${NC}"
+            local config_file="/etc/sysconfig/network-scripts/ifcfg-$interface"
+            sudo cp "$config_file" "$config_file.bak"
+            sudo sed -i "/^IPADDR=/d;/^PREFIX=/d;/^NETMASK=/d" "$config_file"
+            sudo systemctl restart network
+            ;;
+        *)
+            echo -e "${YELLOW}无法自动持久化配置，请手动更新网络配置${NC}"
+            return 1
+            ;;
+    esac
+    
+    echo -e "${GREEN}IP地址删除完成！${NC}"
+    log "INFO" "已删除网卡 $interface 的IP $current_ip"
+}
+
+# 功能6：IP地址管理
+ip_management() {
+    echo -e "${YELLOW}====== IP地址管理 ======${NC}"
+    echo "1. 添加静态IP"
+    echo "2. 修改现有IP"
+    echo "3. 删除现有IP"
+    echo "0. 返回主菜单"
+    read -p "请选择操作 [0-3]: " choice
+    
+    case $choice in
+        1) add_ip ;;
+        2) modify_ip ;;
+        3) delete_ip ;;
+        0) return ;;
+        *) echo -e "${RED}无效选择！${NC}" ;;
+    esac
+}
+
+# 功能6.1：修改现有IP
+modify_ip() {
+    # 获取并列出网卡和IP信息(仅显示IPv4)
+    echo -e "${YELLOW}当前网卡和IPv4信息:${NC}"
+    ip -o addr show | awk '/inet / && !/inet6/ {print $2": "$4}' | grep -v "lo:" | while read -r line; do
+        echo -e "  ${GREEN}$line${NC}"
+    done
+    
+    # 选择网卡
+    echo -e "${YELLOW}可用网卡列表:${NC}"
+    local i=1
+    declare -A nic_map
+    while read -r line; do
+        nic=$(echo "$line" | awk -F': ' '{print $2}')
+        nic_map[$i]=$nic
+        echo "$i. $nic"
+        ((i++))
+    done < <(ip -o link show | grep -v "lo:")
+    
+    read -p "请输入要修改的网卡编号: " choice
+    if [[ ! $choice =~ ^[0-9]+$ ]] || [[ ! ${nic_map[$choice]} ]]; then
+        echo -e "${RED}错误: 无效的网卡编号！${NC}"
         return 1
     fi
+    interface=${nic_map[$choice]}
+    
+    # 获取当前IP
+    current_ip=$(ip -o addr show dev $interface | awk '/inet / {print $4}')
+    echo -e "${YELLOW}当前IP配置: ${current_ip:-无}${NC}"
+    
+    # IP地址输入选项
+    echo "1. 使用CIDR格式输入 (如 192.168.1.100/24)"
+    echo "2. 分别输入IP和子网掩码"
+    read -p "请选择输入方式 [1-2]: " ip_choice
+    
+    case $ip_choice in
+        1)
+            read -p "请输入新IP地址 (CIDR格式 如192.168.1.100/24): " ip_addr
+            if ! [[ $ip_addr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+                echo -e "${RED}错误: IP地址格式不正确，请使用 CIDR 格式 (如 192.168.1.100/24)${NC}"
+                return 1
+            fi
+            ;;
+        2)
+            read -p "请输入新IP地址 (如192.168.1.100): " ip
+            read -p "请输入子网掩码 (如255.255.255.0): " mask
+            
+            # 验证IP格式
+            if ! [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo -e "${RED}错误: IP地址格式不正确${NC}"
+                return 1
+            fi
+            
+            # 验证子网掩码并转换为CIDR
+            case $mask in
+                255.255.255.255) cidr=32 ;;
+                255.255.255.254) cidr=31 ;;
+                255.255.255.252) cidr=30 ;;
+                255.255.255.248) cidr=29 ;;
+                255.255.255.240) cidr=28 ;;
+                255.255.255.224) cidr=27 ;;
+                255.255.255.192) cidr=26 ;;
+                255.255.255.128) cidr=25 ;;
+                255.255.255.0) cidr=24 ;;
+                255.255.254.0) cidr=23 ;;
+                255.255.252.0) cidr=22 ;;
+                255.255.248.0) cidr=21 ;;
+                255.255.240.0) cidr=20 ;;
+                255.255.224.0) cidr=19 ;;
+                255.255.192.0) cidr=18 ;;
+                255.255.128.0) cidr=17 ;;
+                255.255.0.0) cidr=16 ;;
+                255.254.0.0) cidr=15 ;;
+                255.252.0.0) cidr=14 ;;
+                255.248.0.0) cidr=13 ;;
+                255.240.0.0) cidr=12 ;;
+                255.224.0.0) cidr=11 ;;
+                255.192.0.0) cidr=10 ;;
+                255.128.0.0) cidr=9 ;;
+                255.0.0.0) cidr=8 ;;
+                254.0.0.0) cidr=7 ;;
+                252.0.0.0) cidr=6 ;;
+                248.0.0.0) cidr=5 ;;
+                240.0.0.0) cidr=4 ;;
+                224.0.0.0) cidr=3 ;;
+                192.0.0.0) cidr=2 ;;
+                128.0.0.0) cidr=1 ;;
+                0.0.0.0) cidr=0 ;;
+                *)
+                    echo -e "${RED}错误: 无效的子网掩码${NC}"
+                    return 1
+                    ;;
+            esac
+            ip_addr="$ip/$cidr"
+            ;;
+        *)
+            echo -e "${RED}无效选择！${NC}"
+            return 1
+            ;;
+    esac
+    
+    # 删除旧IP
+    if [ -n "$current_ip" ]; then
+        sudo ip addr del "$current_ip" dev "$interface"
+        echo -e "${YELLOW}已删除旧IP: $current_ip${NC}"
+    fi
+    
+    # 添加新IP
+    sudo ip addr add "$ip_addr" dev "$interface"
+    echo -e "${GREEN}已添加新IP: $ip_addr${NC}"
+    
+    # 持久化配置
+    case $NETWORK_SERVICE in
+        netplan)
+            echo -e "${YELLOW}使用 netplan 更新网络配置${NC}"
+            local config_file="/etc/netplan/01-netcfg.yaml"
+            [ -f "$config_file" ] || config_file=$(ls /etc/netplan/*.yaml | head -1)
+            sudo cp "$config_file" "$config_file.bak"
+            sudo sed -i "/$interface:/,/^[^ ]/ {/addresses:/!b; s|addresses: \[.*\]|addresses: [$ip_addr]|}" "$config_file"
+            sudo netplan apply
+            ;;
+        network-scripts)
+            echo -e "${YELLOW}使用 network-scripts 更新网络配置${NC}"
+            local config_file="/etc/sysconfig/network-scripts/ifcfg-$interface"
+            sudo cp "$config_file" "$config_file.bak"
+            sudo sed -i "/^IPADDR=/d;/^PREFIX=/d;/^NETMASK=/d" "$config_file"
+            echo "IPADDR=${ip_addr%/*}" | sudo tee -a "$config_file"
+            echo "PREFIX=${ip_addr#*/}" | sudo tee -a "$config_file"
+            sudo systemctl restart network
+            ;;
+        *)
+            echo -e "${YELLOW}无法自动持久化配置，请手动更新网络配置${NC}"
+            return 1
+            ;;
+    esac
+    
+    echo -e "${GREEN}IP地址修改完成！${NC}"
+    log "INFO" "已修改网卡 $interface 的IP为 $ip_addr"
+}
+
+# 功能5：网卡
+add_ip() {
+    # 获取并列出网卡列表
+    echo -e "${YELLOW}可用网卡列表:${NC}"
+    local i=1
+    declare -A nic_map
+    while read -r line; do
+        nic=$(echo "$line" | awk -F': ' '{print $2}')
+        nic_map[$i]=$nic
+        echo "$i. $nic"
+        ((i++))
+    done < <(ip -o link show)
+    
+    # 选择网卡
+    read -p "请输入要配置的网卡编号: " choice
+    if [[ ! $choice =~ ^[0-9]+$ ]] || [[ ! ${nic_map[$choice]} ]]; then
+        echo -e "${RED}错误: 无效的网卡编号！${NC}"
+        return 1
+    fi
+    interface=${nic_map[$choice]}
+    
+    # IP地址输入选项
+    echo "1. 使用CIDR格式输入 (如 192.168.1.100/24)"
+    echo "2. 分别输入IP和子网掩码"
+    read -p "请选择输入方式 [1-2]: " ip_choice
+    
+    case $ip_choice in
+        1)
+            read -p "请输入IP地址 (CIDR格式 如192.168.1.100/24): " ip_addr
+            if ! [[ $ip_addr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+                echo -e "${RED}错误: IP地址格式不正确，请使用 CIDR 格式 (如 192.168.1.100/24)${NC}"
+                return 1
+            fi
+            ;;
+        2)
+            read -p "请输入IP地址 (如192.168.1.100): " ip
+            read -p "请输入子网掩码 (如255.255.255.0): " mask
+            
+            # 验证IP格式
+            if ! [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo -e "${RED}错误: IP地址格式不正确${NC}"
+                return 1
+            fi
+            
+            # 验证子网掩码并转换为CIDR
+            case $mask in
+                255.255.255.255) cidr=32 ;;
+                255.255.255.254) cidr=31 ;;
+                255.255.255.252) cidr=30 ;;
+                255.255.255.248) cidr=29 ;;
+                255.255.255.240) cidr=28 ;;
+                255.255.255.224) cidr=27 ;;
+                255.255.255.192) cidr=26 ;;
+                255.255.255.128) cidr=25 ;;
+                255.255.255.0) cidr=24 ;;
+                255.255.254.0) cidr=23 ;;
+                255.255.252.0) cidr=22 ;;
+                255.255.248.0) cidr=21 ;;
+                255.255.240.0) cidr=20 ;;
+                255.255.224.0) cidr=19 ;;
+                255.255.192.0) cidr=18 ;;
+                255.255.128.0) cidr=17 ;;
+                255.255.0.0) cidr=16 ;;
+                255.254.0.0) cidr=15 ;;
+                255.252.0.0) cidr=14 ;;
+                255.248.0.0) cidr=13 ;;
+                255.240.0.0) cidr=12 ;;
+                255.224.0.0) cidr=11 ;;
+                255.192.0.0) cidr=10 ;;
+                255.128.0.0) cidr=9 ;;
+                255.0.0.0) cidr=8 ;;
+                254.0.0.0) cidr=7 ;;
+                252.0.0.0) cidr=6 ;;
+                248.0.0.0) cidr=5 ;;
+                240.0.0.0) cidr=4 ;;
+                224.0.0.0) cidr=3 ;;
+                192.0.0.0) cidr=2 ;;
+                128.0.0.0) cidr=1 ;;
+                0.0.0.0) cidr=0 ;;
+                *)
+                    echo -e "${RED}错误: 无效的子网掩码${NC}"
+                    return 1
+                    ;;
+            esac
+            ip_addr="$ip/$cidr"
+            ;;
+        *)
+            echo -e "${RED}无效选择！${NC}"
+            return 1
+            ;;
+    esac
     
     # 临时添加IP
     sudo ip addr add "$ip_addr" dev "$interface"
@@ -438,12 +888,13 @@ add_ip() {
 
 # ====== 系统信息功能 ======
 
-# 功能6: 显示系统信息
+# 功能7: 显示系统信息
 show_system_info() {
     echo -e "${YELLOW}====== 系统信息 ======${NC}"
     echo -e "主机名: $(hostname)"
-    echo -e "操作系统: $OS $OS_VERSION"
-    echo -e "内核版本: $(uname -r)"
+    echo -e "操作系统: $OS_PRETTY_NAME"
+    echo -e "硬件型号: $HW_MODEL"
+    echo -e "内核版本: $KERNEL_INFO"
     echo -e "CPU信息: $(grep 'model name' /proc/cpuinfo | head -n1 | cut -d':' -f2 | sed 's/^[ \t]*//')"
     echo -e "CPU核心数: $(nproc)"
     echo -e "内存总量: $(free -h | grep Mem | awk '{print $2}')"
@@ -959,14 +1410,15 @@ show_menu() {
     echo -e "║                 \033[1;37m系统管理脚本 \033\033[1;36m                   ║"
     echo -e "╠═════════════════════════════════════════════════╣"
     echo -e "║ \033[1;32m 1.修改SSH端口　 \033[1;32m 2.防火墙放行　 \033[1;32m 3.开关防火墙  \033[1;36m║"
-    echo -e "║ \033[1;32m 4.网卡检测　　　\033[1;32m 5.添加静态IP　 \033[1;32m 6.系统信息　  \033[1;36m║"
-    echo -e "║ \033[1;32m 7.用户管理　　　\033[1;32m 8.服务管理　　 \033[1;32m 9.磁盘清理　  \033[1;36m║"
-    echo -e "║ \033[1;32m10.更换软件源　　\033[1;32m11.安全扫描　　 \033[1;32m12.性能调优　  \033[1;36m║"
-    echo -e "║ \033[1;32m13.恢复SSH配置　\033[1;32m 14.安装常用软件 \033[1;32m15.宝塔管理    \033[1;36m║"
+    echo -e "║ \033[1;32m 4.iptables管理　\033[1;32m 5.网卡检测　　 \033[1;32m 6.IP地址管理  \033[1;36m║"
+    echo -e "║ \033[1;32m 7.系统信息　　　\033[1;32m 8.用户管理　　 \033[1;32m 9.服务管理　  \033[1;36m║"
+    echo -e "║ \033[1;32m10.磁盘清理　　　\033[1;32m11.更换软件源　 \033[1;32m12.安全扫描　  \033[1;36m║"
+    echo -e "║ \033[1;32m13.性能调优　　　\033[1;32m14.恢复SSH配置 \033[1;32m 15.安装常用软件\033[1;36m║"
+    echo -e "║ \033[1;32m16.宝塔管理　　　　　　　　　　　　　　　　　   \033[1;36m║"
     echo -e "║ \033[1;31m 0.退出脚本　　　　　　　　　　　　　　　　　　 \033[1;36m║"
     echo -e "╚═════════════════════════════════════════════════╝\033[0m"
-    echo -e " \033[1;34m系统:\033[1;33m$OS $OS_VERSION\033[0m  \033[1;34m     时间:\033[1;33m$(date '+%Y-%m-%d %H:%M:%S')\033[0m"
-    echo -e " \033[1;34m日志:\033[1;33m$LOG_FILE\033[0m  \033[1;34mSSH端口:\033[1;33m$(get_current_ssh_port)\033[0m"
+    echo -e " \033[1;34m系统:\033[1;33m$OS_PRETTY_NAME\033[0m  \033[1;34m     时间:\033[1;33m$(date '+%Y-%m-%d %H:%M:%S')\033[0m"
+    echo -e " \033[1;34m日志:\033[1;33m$LOG_FILE\033[0m      \033[1;34mSSH端口:\033[1;33m$(get_current_ssh_port)\033[0m"
 }
 
 # 初始化系统
@@ -980,18 +1432,19 @@ while true; do
         1) modify_ssh_port ;;
         2) allow_firewall_port ;;
         3) toggle_firewall ;;
-        4) check_nic;;
-        5) add_ip;;
-        6) show_system_info;;
-        7) user_management;;
-        8) service_management;;
-        9) disk_cleanup;;
-        10) change_repo_source;;
-        11) security_scan;;
-        12) performance_tuning;;
-        13) restore_ssh_config;;
-        14) install_common_software;;
-        15) baota_management;;
+        4) iptables_all;;
+        5) check_nic;;
+        6) ip_management;;
+        7) show_system_info;;
+        8) user_management;;
+        9) service_management;;
+        10) disk_cleanup;;
+        11) change_repo_source;;
+        12) security_scan;;
+        13) performance_tuning;;
+        14) restore_ssh_config;;
+        15) install_common_software;;
+        16) baota_management;;
         0) echo -e "${GREEN}已退出脚本。${NC}"; log "INFO" "脚本正常退出"; exit 0 ;;
         *) echo -e "${RED}无效选项，请重新输入！${NC}"; log "WARNING" "无效菜单选项: $choice" ;;
     esac
