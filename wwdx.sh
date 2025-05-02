@@ -1,4 +1,4 @@
-#!/bin/bash
+##!/bin/bash
 
 # 日志文件路径
 LOG_FILE="/var/log/wwdx.log"
@@ -88,21 +88,18 @@ init_system() {
     fi
 
     # 检测服务管理器
-    declare -A service_managers=(
-        ["systemctl"]="systemctl"
-        ["service"]="service"
-        ["rc-service"]="openrc"
-        ["sv"]="runit"      # Void Linux
-        ["initctl"]="upstart" # Older Ubuntu
-    )
-
     SERVICE_MANAGER="unknown"
-    for cmd in "${!service_managers[@]}"; do
-        if command -v "$cmd" &>/dev/null; then
-            SERVICE_MANAGER="${service_managers[$cmd]}"
-            break
-        fi
-    done
+    if command -v systemctl &>/dev/null; then
+        SERVICE_MANAGER="systemctl"
+    elif command -v service &>/dev/null; then
+        SERVICE_MANAGER="service"
+    elif command -v rc-service &>/dev/null; then
+        SERVICE_MANAGER="openrc"
+    elif command -v sv &>/dev/null; then
+        SERVICE_MANAGER="runit"
+    elif command -v initctl &>/dev/null; then
+        SERVICE_MANAGER="upstart"
+    fi
 
     # 特殊发行版处理
     if [ -f /etc/alpine-release ]; then
@@ -892,24 +889,18 @@ add_ip() {
 
 # 功能7: 显示系统信息
 show_system_info() {
-    # 确保系统信息已初始化
-    init_system
-    
-    echo -e "${YELLOW}====== 系统信息 ======${NC}"
-    echo -e "主机名: $(hostname)"
-    echo -e "操作系统: ${SYSTEM_INFO_OS_PRETTY_NAME}"
-    echo -e "硬件型号: ${SYSTEM_INFO_HW_MODEL}"
-    echo -e "内核版本: $(uname -r)"
-    echo -e "CPU信息: $(grep 'model name' /proc/cpuinfo | head -n1 | cut -d':' -f2 | sed 's/^[ \t]*//')"
-    echo -e "CPU核心数: $(nproc)"
-    echo -e "内存总量: $(free -h | grep Mem | awk '{print $2}')"
-    echo -e "内存使用: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-    echo -e "磁盘空间: $(df -h / | awk 'NR==2 {print $3"/"$2 " ("$5")"}')"
-    echo -e "IP地址: $(hostname -I | awk '{print $1}')"
-    echo -e "SSH端口: $(get_current_ssh_port)"
-    echo -e "系统运行时间: $(uptime -p)"
-    echo -e "${YELLOW}=====================${NC}"
-    log "INFO" "查看系统信息"
+    echo "====== 系统信息 ======"
+    echo "主机名: $(hostname)"
+    echo "操作系统: $(grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'"' -f2 || uname -o)"
+    echo "内核版本: $(uname -r)"
+    echo "CPU信息: $(grep 'model name' /proc/cpuinfo 2>/dev/null | head -n1 | cut -d':' -f2 | sed 's/^[ \t]*//' || echo '未知')"
+    echo "CPU核心数: $(nproc 2>/dev/null || echo '未知')"
+    echo "内存总量: $(free -h 2>/dev/null | grep Mem | awk '{print $2}' || echo '未知')"
+    echo "内存使用: $(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo '未知')"
+    echo "磁盘空间: $(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2 " ("$5")"}' || echo '未知')"
+    echo "IP地址: $(hostname -I 2>/dev/null | awk '{print $1}' || ip addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -n1 | awk '{print $2}' | cut -d'/' -f1 || echo '未知')"
+    echo "系统运行时间: $(uptime -p 2>/dev/null || echo '未知')"
+    echo "====================="
 }
 
 # ====== 账户管理功能 ======
@@ -1411,8 +1402,18 @@ restore_ssh_config() {
 # 主菜单
 show_menu() {
     clear
+    # 确保系统信息已初始化
+    init_system
+    
+    # 定义系统信息缓存数组
+    declare -A SYSTEM_INFO_CACHE=(
+        ["os_pretty_name"]="$SYSTEM_INFO_OS_PRETTY_NAME"
+        ["hw_model"]="$SYSTEM_INFO_HW_MODEL"
+        ["kernel_info"]="$SYSTEM_INFO_KERNEL_INFO"
+    )
+    
     echo -e "\033[1;36m╔═════════════════════════════════════════════════╗"
-    echo -e "║                 \033[1;37m系统管理脚本 \033\033[1;36m                   ║"
+    echo -e "║                 \033[1;37m系统管理脚本 \033[1;36m                   ║"
     echo -e "╠═════════════════════════════════════════════════╣"
     echo -e "║ \033[1;32m 1.修改SSH端口　 \033[1;32m 2.防火墙放行　 \033[1;32m 3.开关防火墙  \033[1;36m║"
     echo -e "║ \033[1;32m 4.iptables管理　\033[1;32m 5.网卡检测　　 \033[1;32m 6.IP地址管理  \033[1;36m║"
