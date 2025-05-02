@@ -1,4 +1,4 @@
-##!/bin/bash
+#!/bin/bash
 
 # 日志文件路径
 LOG_FILE="/var/log/wwdx.log"
