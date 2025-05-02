@@ -17,69 +17,103 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # 系统检测和初始化
+# 全局缓存变量
+declare -gA SYSTEM_INFO_CACHE
+
 init_system() {
+    # 如果已经初始化过则直接返回
+    if [[ -n "${SYSTEM_INFO_CACHE[initialized]}" ]]; then
+        return
+    fi
+
     # 检测操作系统和硬件信息
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        OS=$ID
-        OS_VERSION=$VERSION_ID
-        OS_PRETTY_NAME="$PRETTY_NAME"
+        SYSTEM_INFO_CACHE[os]=$ID
+        SYSTEM_INFO_CACHE[os_version]=$VERSION_ID
+        SYSTEM_INFO_CACHE[os_pretty_name]="$PRETTY_NAME"
     elif [ -f /etc/centos-release ]; then
-        OS="centos"
-        OS_VERSION=$(grep -oE '[0-9]+\.[0-9]+' /etc/centos-release)
-        OS_PRETTY_NAME=$(cat /etc/centos-release)
+        SYSTEM_INFO_CACHE[os]="centos"
+        SYSTEM_INFO_CACHE[os_version]=$(grep -oE '[0-9]+\.[0-9]+' /etc/centos-release)
+        SYSTEM_INFO_CACHE[os_pretty_name]=$(cat /etc/centos-release)
     elif [ -f /etc/debian_version ]; then
-        OS="debian" 
-        OS_VERSION=$(cat /etc/debian_version)
-        OS_PRETTY_NAME="Debian $OS_VERSION"
+        SYSTEM_INFO_CACHE[os]="debian"
+        SYSTEM_INFO_CACHE[os_version]=$(cat /etc/debian_version)
+        SYSTEM_INFO_CACHE[os_pretty_name]="Debian ${SYSTEM_INFO_CACHE[os_version]}"
     elif [ -f /etc/alpine-release ]; then
-        OS="alpine"
-        OS_VERSION=$(cat /etc/alpine-release)
-        OS_PRETTY_NAME="Alpine Linux $OS_VERSION"
+        SYSTEM_INFO_CACHE[os]="alpine"
+        SYSTEM_INFO_CACHE[os_version]=$(cat /etc/alpine-release)
+        SYSTEM_INFO_CACHE[os_pretty_name]="Alpine Linux ${SYSTEM_INFO_CACHE[os_version]}"
     else
-        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-        OS_VERSION=$(uname -r)
-        OS_PRETTY_NAME="$OS $OS_VERSION"
+        SYSTEM_INFO_CACHE[os]=$(uname -s | tr '[:upper:]' '[:lower:]')
+        SYSTEM_INFO_CACHE[os_version]=$(uname -r)
+        SYSTEM_INFO_CACHE[os_pretty_name]="${SYSTEM_INFO_CACHE[os]} ${SYSTEM_INFO_CACHE[os_version]}"
     fi
     
     # 检测硬件型号
     if [ -f /sys/devices/virtual/dmi/id/product_name ]; then
-        HW_MODEL=$(cat /sys/devices/virtual/dmi/id/product_name)
+        SYSTEM_INFO_CACHE[hw_model]=$(cat /sys/devices/virtual/dmi/id/product_name)
     elif command -v dmidecode &>/dev/null; then
-        HW_MODEL=$(sudo dmidecode -s system-product-name)
+        SYSTEM_INFO_CACHE[hw_model]=$(sudo dmidecode -s system-product-name)
     else
-        HW_MODEL="Unknown"
+        SYSTEM_INFO_CACHE[hw_model]="Unknown"
     fi
     
     # 检测内核详细信息
-    KERNEL_INFO=$(uname -a)
+    SYSTEM_INFO_CACHE[kernel_info]=$(uname -a)
 
     # 检测包管理器
-    if command -v apt &>/dev/null; then
-        PKG_MANAGER="apt"
-    elif command -v dnf &>/dev/null; then
-        PKG_MANAGER="dnf"
-    elif command -v yum &>/dev/null; then
-        PKG_MANAGER="yum"
-    elif command -v pacman &>/dev/null; then
-        PKG_MANAGER="pacman"
-    elif command -v zypper &>/dev/null; then
-        PKG_MANAGER="zypper"
-    elif command -v apk &>/dev/null; then
-        PKG_MANAGER="apk"
-    else
-        PKG_MANAGER="unknown"
-    fi
+    declare -A pkg_managers=(
+        ["apt"]="apt"
+        ["dnf"]="dnf" 
+        ["yum"]="yum"
+        ["pacman"]="pacman"
+        ["zypper"]="zypper"
+        ["apk"]="apk"
+        ["emerge"]="emerge"  # Gentoo
+        ["pkg"]="pkg"        # FreeBSD
+        ["pkgin"]="pkgin"    # NetBSD
+    )
+
+    PKG_MANAGER="unknown"
+    for cmd in "${!pkg_managers[@]}"; do
+        if command -v "$cmd" &>/dev/null; then
+            PKG_MANAGER="${pkg_managers[$cmd]}"
+            break
+        fi
+    done
 
     # 检测服务管理器
-    if command -v systemctl &>/dev/null; then
-        SERVICE_MANAGER="systemctl"
-    elif command -v service &>/dev/null; then
-        SERVICE_MANAGER="service"
-    elif command -v rc-service &>/dev/null; then
-        SERVICE_MANAGER="openrc"
-    else
-        SERVICE_MANAGER="unknown"
+    declare -A service_managers=(
+        ["systemctl"]="systemctl"
+        ["service"]="service"
+        ["rc-service"]="openrc"
+        ["sv"]="runit"      # Void Linux
+        ["initctl"]="upstart" # Older Ubuntu
+    )
+
+    SERVICE_MANAGER="unknown"
+    for cmd in "${!service_managers[@]}"; do
+        if command -v "$cmd" &>/dev/null; then
+            SERVICE_MANAGER="${service_managers[$cmd]}"
+            break
+        fi
+    done
+
+    # 特殊发行版处理
+    if [ -f /etc/alpine-release ]; then
+        # Alpine Linux特殊处理
+        OS="alpine"
+        [ -z "$PKG_MANAGER" ] && PKG_MANAGER="apk"
+        [ -z "$SERVICE_MANAGER" ] && SERVICE_MANAGER="openrc"
+    elif [ -f /etc/arch-release ]; then
+        # Arch Linux特殊处理
+        OS="arch"
+        [ -z "$PKG_MANAGER" ] && PKG_MANAGER="pacman"
+    elif [ -f /etc/gentoo-release ]; then
+        # Gentoo特殊处理
+        OS="gentoo"
+        [ -z "$PKG_MANAGER" ] && PKG_MANAGER="emerge"
     fi
 
     # 检测网络配置方式
@@ -670,45 +704,30 @@ modify_ip() {
             fi
             
             # 验证子网掩码并转换为CIDR
-            case $mask in
-                255.255.255.255) cidr=32 ;;
-                255.255.255.254) cidr=31 ;;
-                255.255.255.252) cidr=30 ;;
-                255.255.255.248) cidr=29 ;;
-                255.255.255.240) cidr=28 ;;
-                255.255.255.224) cidr=27 ;;
-                255.255.255.192) cidr=26 ;;
-                255.255.255.128) cidr=25 ;;
-                255.255.255.0) cidr=24 ;;
-                255.255.254.0) cidr=23 ;;
-                255.255.252.0) cidr=22 ;;
-                255.255.248.0) cidr=21 ;;
-                255.255.240.0) cidr=20 ;;
-                255.255.224.0) cidr=19 ;;
-                255.255.192.0) cidr=18 ;;
-                255.255.128.0) cidr=17 ;;
-                255.255.0.0) cidr=16 ;;
-                255.254.0.0) cidr=15 ;;
-                255.252.0.0) cidr=14 ;;
-                255.248.0.0) cidr=13 ;;
-                255.240.0.0) cidr=12 ;;
-                255.224.0.0) cidr=11 ;;
-                255.192.0.0) cidr=10 ;;
-                255.128.0.0) cidr=9 ;;
-                255.0.0.0) cidr=8 ;;
-                254.0.0.0) cidr=7 ;;
-                252.0.0.0) cidr=6 ;;
-                248.0.0.0) cidr=5 ;;
-                240.0.0.0) cidr=4 ;;
-                224.0.0.0) cidr=3 ;;
-                192.0.0.0) cidr=2 ;;
-                128.0.0.0) cidr=1 ;;
-                0.0.0.0) cidr=0 ;;
-                *)
-                    echo -e "${RED}错误: 无效的子网掩码${NC}"
+            if ! [[ $mask =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo -e "${RED}错误: 无效的子网掩码格式${NC}"
+                return 1
+            fi
+            
+            # 将掩码转换为二进制计算1的个数
+            cidr=0
+            for octet in ${mask//./ }; do
+                if [ $octet -gt 255 ]; then
+                    echo -e "${RED}错误: 无效的子网掩码值${NC}"
                     return 1
-                    ;;
-            esac
+                fi
+                # 计算每个八位组的1的个数
+                binary=$(echo "obase=2;$octet" | bc)
+                cidr=$((cidr + ${binary//0/}))
+            done
+            
+            # ${YELLOW}验证掩码有效性(连续的1)${NC}
+            valid_mask=$(( (0xffffffff << (32 - cidr)) & 0xffffffff ))
+            input_mask=$(echo $mask | awk -F. '{printf "0x%02x%02x%02x%02x\n", $1, $2, $3, $4}')
+            if [ $((valid_mask)) -ne $((input_mask)) ]; then
+                echo -e "${RED}错误: 无效的子网掩码(非连续1)${NC}"
+                return 1
+            fi
             ip_addr="$ip/$cidr"
             ;;
         *)
@@ -800,46 +819,25 @@ add_ip() {
                 return 1
             fi
             
-            # 验证子网掩码并转换为CIDR
-            case $mask in
-                255.255.255.255) cidr=32 ;;
-                255.255.255.254) cidr=31 ;;
-                255.255.255.252) cidr=30 ;;
-                255.255.255.248) cidr=29 ;;
-                255.255.255.240) cidr=28 ;;
-                255.255.255.224) cidr=27 ;;
-                255.255.255.192) cidr=26 ;;
-                255.255.255.128) cidr=25 ;;
-                255.255.255.0) cidr=24 ;;
-                255.255.254.0) cidr=23 ;;
-                255.255.252.0) cidr=22 ;;
-                255.255.248.0) cidr=21 ;;
-                255.255.240.0) cidr=20 ;;
-                255.255.224.0) cidr=19 ;;
-                255.255.192.0) cidr=18 ;;
-                255.255.128.0) cidr=17 ;;
-                255.255.0.0) cidr=16 ;;
-                255.254.0.0) cidr=15 ;;
-                255.252.0.0) cidr=14 ;;
-                255.248.0.0) cidr=13 ;;
-                255.240.0.0) cidr=12 ;;
-                255.224.0.0) cidr=11 ;;
-                255.192.0.0) cidr=10 ;;
-                255.128.0.0) cidr=9 ;;
-                255.0.0.0) cidr=8 ;;
-                254.0.0.0) cidr=7 ;;
-                252.0.0.0) cidr=6 ;;
-                248.0.0.0) cidr=5 ;;
-                240.0.0.0) cidr=4 ;;
-                224.0.0.0) cidr=3 ;;
-                192.0.0.0) cidr=2 ;;
-                128.0.0.0) cidr=1 ;;
-                0.0.0.0) cidr=0 ;;
-                *)
-                    echo -e "${RED}错误: 无效的子网掩码${NC}"
+            # 将掩码转换为二进制计算1的个数
+            cidr=0
+            for octet in ${mask//./ }; do
+                if [ $octet -gt 255 ]; then
+                    echo -e "${RED}错误: 无效的子网掩码值${NC}"
                     return 1
-                    ;;
-            esac
+                fi
+                # 计算每个八位组的1的个数
+                binary=$(echo "obase=2;$octet" | bc)
+                cidr=$((cidr + ${binary//0/}))
+            done
+
+            # 验证掩码有效性(连续的1)
+            valid_mask=$(( (0xffffffff << (32 - cidr)) & 0xffffffff ))
+            input_mask=$(echo $mask | awk -F. '{printf "0x%02x%02x%02x%02x\n", $1, $2, $3, $4}')
+            if [ $((valid_mask)) -ne $((input_mask)) ]; then
+                echo -e "${RED}错误: 无效的子网掩码(非连续1)${NC}"
+                return 1
+            fi
             ip_addr="$ip/$cidr"
             ;;
         *)
@@ -890,11 +888,14 @@ add_ip() {
 
 # 功能7: 显示系统信息
 show_system_info() {
+    # 确保系统信息已初始化
+    init_system
+    
     echo -e "${YELLOW}====== 系统信息 ======${NC}"
     echo -e "主机名: $(hostname)"
-    echo -e "操作系统: $OS_PRETTY_NAME"
-    echo -e "硬件型号: $HW_MODEL"
-    echo -e "内核版本: $KERNEL_INFO"
+    echo -e "操作系统: ${SYSTEM_INFO_CACHE[os_pretty_name]}"
+    echo -e "硬件型号: ${SYSTEM_INFO_CACHE[hw_model]}"
+    echo -e "内核版本: $(uname -r)"
     echo -e "CPU信息: $(grep 'model name' /proc/cpuinfo | head -n1 | cut -d':' -f2 | sed 's/^[ \t]*//')"
     echo -e "CPU核心数: $(nproc)"
     echo -e "内存总量: $(free -h | grep Mem | awk '{print $2}')"
@@ -1417,7 +1418,7 @@ show_menu() {
     echo -e "║ \033[1;32m16.宝塔管理　　　　　　　　　　　　　　　　　   \033[1;36m║"
     echo -e "║ \033[1;31m 0.退出脚本　　　　　　　　　　　　　　　　　　 \033[1;36m║"
     echo -e "╚═════════════════════════════════════════════════╝\033[0m"
-    echo -e " \033[1;34m系统:\033[1;33m$OS_PRETTY_NAME\033[0m  \033[1;34m     时间:\033[1;33m$(date '+%Y-%m-%d %H:%M:%S')\033[0m"
+    echo -e " \033[1;34m系统:\033[1;33m${SYSTEM_INFO_CACHE[os_pretty_name]}\033[0m  \033[1;34m     时间:\033[1;33m$(date '+%Y-%m-%d %H:%M:%S')\033[0m"
     echo -e " \033[1;34m日志:\033[1;33m$LOG_FILE\033[0m      \033[1;34mSSH端口:\033[1;33m$(get_current_ssh_port)\033[0m"
 }
 
