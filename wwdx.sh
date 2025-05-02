@@ -18,70 +18,74 @@ NC='\033[0m'
 
 # 系统检测和初始化
 # 全局缓存变量
-declare -gA SYSTEM_INFO_CACHE
+SYSTEM_INFO_INITIALIZED=""
+SYSTEM_INFO_OS=""
+SYSTEM_INFO_OS_VERSION=""
+SYSTEM_INFO_OS_PRETTY_NAME=""
 
 init_system() {
     # 如果已经初始化过则直接返回
-    if [[ -n "${SYSTEM_INFO_CACHE[initialized]}" ]]; then
+    if [[ -n "$SYSTEM_INFO_INITIALIZED" ]]; then
         return
     fi
 
     # 检测操作系统和硬件信息
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        SYSTEM_INFO_CACHE[os]=$ID
-        SYSTEM_INFO_CACHE[os_version]=$VERSION_ID
-        SYSTEM_INFO_CACHE[os_pretty_name]="$PRETTY_NAME"
+        SYSTEM_INFO_OS=$ID
+        SYSTEM_INFO_OS_VERSION=$VERSION_ID
+        SYSTEM_INFO_OS_PRETTY_NAME="$PRETTY_NAME"
     elif [ -f /etc/centos-release ]; then
-        SYSTEM_INFO_CACHE[os]="centos"
-        SYSTEM_INFO_CACHE[os_version]=$(grep -oE '[0-9]+\.[0-9]+' /etc/centos-release)
-        SYSTEM_INFO_CACHE[os_pretty_name]=$(cat /etc/centos-release)
+        SYSTEM_INFO_OS="centos"
+        SYSTEM_INFO_OS_VERSION=$(grep -oE '[0-9]+\.[0-9]+' /etc/centos-release)
+        SYSTEM_INFO_OS_PRETTY_NAME=$(cat /etc/centos-release)
     elif [ -f /etc/debian_version ]; then
-        SYSTEM_INFO_CACHE[os]="debian"
-        SYSTEM_INFO_CACHE[os_version]=$(cat /etc/debian_version)
-        SYSTEM_INFO_CACHE[os_pretty_name]="Debian ${SYSTEM_INFO_CACHE[os_version]}"
+        SYSTEM_INFO_OS="debian"
+        SYSTEM_INFO_OS_VERSION=$(cat /etc/debian_version)
+        SYSTEM_INFO_OS_PRETTY_NAME="Debian ${SYSTEM_INFO_OS_VERSION}"
     elif [ -f /etc/alpine-release ]; then
-        SYSTEM_INFO_CACHE[os]="alpine"
-        SYSTEM_INFO_CACHE[os_version]=$(cat /etc/alpine-release)
-        SYSTEM_INFO_CACHE[os_pretty_name]="Alpine Linux ${SYSTEM_INFO_CACHE[os_version]}"
+        SYSTEM_INFO_OS="alpine"
+        SYSTEM_INFO_OS_VERSION=$(cat /etc/alpine-release)
+        SYSTEM_INFO_OS_PRETTY_NAME="Alpine Linux ${SYSTEM_INFO_OS_VERSION}"
     else
-        SYSTEM_INFO_CACHE[os]=$(uname -s | tr '[:upper:]' '[:lower:]')
-        SYSTEM_INFO_CACHE[os_version]=$(uname -r)
-        SYSTEM_INFO_CACHE[os_pretty_name]="${SYSTEM_INFO_CACHE[os]} ${SYSTEM_INFO_CACHE[os_version]}"
+        SYSTEM_INFO_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        SYSTEM_INFO_OS_VERSION=$(uname -r)
+        SYSTEM_INFO_OS_PRETTY_NAME="${SYSTEM_INFO_OS} ${SYSTEM_INFO_OS_VERSION}"
     fi
     
     # 检测硬件型号
     if [ -f /sys/devices/virtual/dmi/id/product_name ]; then
-        SYSTEM_INFO_CACHE[hw_model]=$(cat /sys/devices/virtual/dmi/id/product_name)
+        SYSTEM_INFO_HW_MODEL=$(cat /sys/devices/virtual/dmi/id/product_name)
     elif command -v dmidecode &>/dev/null; then
-        SYSTEM_INFO_CACHE[hw_model]=$(sudo dmidecode -s system-product-name)
+        SYSTEM_INFO_HW_MODEL=$(sudo dmidecode -s system-product-name)
     else
-        SYSTEM_INFO_CACHE[hw_model]="Unknown"
+        SYSTEM_INFO_HW_MODEL="Unknown"
     fi
     
     # 检测内核详细信息
-    SYSTEM_INFO_CACHE[kernel_info]=$(uname -a)
+    SYSTEM_INFO_KERNEL_INFO=$(uname -a)
 
     # 检测包管理器
-    declare -A pkg_managers=(
-        ["apt"]="apt"
-        ["dnf"]="dnf" 
-        ["yum"]="yum"
-        ["pacman"]="pacman"
-        ["zypper"]="zypper"
-        ["apk"]="apk"
-        ["emerge"]="emerge"  # Gentoo
-        ["pkg"]="pkg"        # FreeBSD
-        ["pkgin"]="pkgin"    # NetBSD
-    )
-
     PKG_MANAGER="unknown"
-    for cmd in "${!pkg_managers[@]}"; do
-        if command -v "$cmd" &>/dev/null; then
-            PKG_MANAGER="${pkg_managers[$cmd]}"
-            break
-        fi
-    done
+    if command -v apt &>/dev/null; then
+        PKG_MANAGER="apt"
+    elif command -v dnf &>/dev/null; then
+        PKG_MANAGER="dnf"
+    elif command -v yum &>/dev/null; then
+        PKG_MANAGER="yum"
+    elif command -v pacman &>/dev/null; then
+        PKG_MANAGER="pacman"
+    elif command -v zypper &>/dev/null; then
+        PKG_MANAGER="zypper"
+    elif command -v apk &>/dev/null; then
+        PKG_MANAGER="apk"
+    elif command -v emerge &>/dev/null; then
+        PKG_MANAGER="emerge"
+    elif command -v pkg &>/dev/null; then
+        PKG_MANAGER="pkg"
+    elif command -v pkgin &>/dev/null; then
+        PKG_MANAGER="pkgin"
+    fi
 
     # 检测服务管理器
     declare -A service_managers=(
@@ -148,9 +152,9 @@ init_system() {
         FIREWALL_TOOL="unknown"
     fi
 
-    log "INFO" "系统检测: $OS_PRETTY_NAME"
-    log "INFO" "硬件型号: $HW_MODEL"
-    log "INFO" "内核信息: $KERNEL_INFO"
+    log "INFO" "系统检测: $SYSTEM_INFO_OS_PRETTY_NAME"
+    log "INFO" "硬件型号: $SYSTEM_INFO_HW_MODEL"
+    log "INFO" "内核信息: $SYSTEM_INFO_KERNEL_INFO"
     log "INFO" "包管理器: $PKG_MANAGER"
     log "INFO" "服务管理: $SERVICE_MANAGER" 
     log "INFO" "网络配置: $NETWORK_SERVICE"
@@ -893,8 +897,8 @@ show_system_info() {
     
     echo -e "${YELLOW}====== 系统信息 ======${NC}"
     echo -e "主机名: $(hostname)"
-    echo -e "操作系统: ${SYSTEM_INFO_CACHE[os_pretty_name]}"
-    echo -e "硬件型号: ${SYSTEM_INFO_CACHE[hw_model]}"
+    echo -e "操作系统: ${SYSTEM_INFO_OS_PRETTY_NAME}"
+    echo -e "硬件型号: ${SYSTEM_INFO_HW_MODEL}"
     echo -e "内核版本: $(uname -r)"
     echo -e "CPU信息: $(grep 'model name' /proc/cpuinfo | head -n1 | cut -d':' -f2 | sed 's/^[ \t]*//')"
     echo -e "CPU核心数: $(nproc)"
